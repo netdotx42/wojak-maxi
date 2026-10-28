@@ -1,0 +1,121 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #06152d;
+  --color-raise: #0a1e40;
+  --color-surface: #10284d;
+  --color-fg: #e8f4ff;
+  --color-muted: #93b0cd;
+  --color-primary: #168bff;
+  --color-cyan: #64d5ff;
+  --color-line: #1e4478;
+  --color-danger: #ff5d73;
+  --color-ok: #3ee0a2;
+  --color-warn: #ffc14d;
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --radius-xl: 1.15rem;
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  html,
+  body {
+    background:
+      radial-gradient(1000px 420px at 8% -10%, color-mix(in srgb, var(--color-primary) 32%, transparent), transparent 55%),
+      radial-gradient(800px 360px at 100% 0%, color-mix(in srgb, var(--color-cyan) 18%, transparent), transparent 50%),
+      var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    min-height: 100%;
+  }
+
+  body {
+    margin: 0;
+  }
+
+  input,
+  button {
+    font: inherit;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--color-primary) 45%, transparent);
+  }
+}
+
+@layer components {
+  .panel {
+    border-radius: var(--radius-xl);
+    border: 1px solid color-mix(in srgb, var(--color-cyan) 28%, var(--color-line));
+    background:
+      linear-gradient(180deg, color-mix(in srgb, white 7%, transparent), transparent 32%),
+      color-mix(in srgb, var(--color-surface) 86%, transparent);
+    box-shadow:
+      inset 0 1px 0 color-mix(in srgb, white 18%, transparent),
+      0 18px 40px color-mix(in srgb, black 35%, transparent);
+    backdrop-filter: blur(16px);
+  }
+
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .live-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    background: var(--color-ok);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-ok) 70%, transparent);
+    animation: pulse-dot 1.8s ease-out infinite;
+  }
+
+  .logo-frame {
+    border-radius: 1rem;
+    object-fit: cover;
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--color-cyan) 75%, white),
+      0 0 28px color-mix(in srgb, var(--color-primary) 55%, transparent);
+  }
+
+  .desk-head {
+    position: sticky;
+    top: 0.75rem;
+    z-index: 30;
+  }
+
+  details > summary {
+    cursor: pointer;
+    list-style: none;
+  }
+
+  details > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .range {
+    accent-color: var(--color-primary);
+    width: 100%;
+    height: 1.5rem;
+  }
+}
+
+@keyframes pulse-dot {
+  70% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+}
