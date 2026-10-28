@@ -1,0 +1,9 @@
+node_modules
+.output
+.nitro
+.vercel
+.git
+screenshots
+artifacts
+attachments
+*.log

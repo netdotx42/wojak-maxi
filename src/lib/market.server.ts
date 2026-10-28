@@ -61,6 +61,7 @@ export type Quote = {
   outputMint: string;
   slippageBps: number;
   quotedAt: number;
+  id: string;
 };
 
 export type SwapSignal = {
@@ -567,7 +568,20 @@ async function jupQuote(inputMint: string, outputMint: string, amount: string, s
     outputMint: json.outputMint || outputMint,
     slippageBps,
     quotedAt: Date.now(),
+    id: stashQuote(json as Record<string, unknown>),
   };
+}
+
+const quoteVault = new Map<string, { at: number; raw: Record<string, unknown> }>();
+
+function stashQuote(raw: Record<string, unknown>) {
+  const now = Date.now();
+  for (const [id, row] of quoteVault) {
+    if (now - row.at > 60_000) quoteVault.delete(id);
+  }
+  const id = crypto.randomUUID();
+  quoteVault.set(id, { at: now, raw });
+  return id;
 }
 
 export type EvalCheck = { id: string; pass: boolean; detail: string };
@@ -718,6 +732,41 @@ export async function evaluateSell(input: { mint: string; amountRaw: string; sli
       quote: null,
     };
   }
+}
+
+export async function buildSwapTx(input: { quoteId: string; userPublicKey: string }) {
+  if (!isSolAddress(input.userPublicKey)) throw new Error("Signer is not a Solana address");
+  const stored = quoteVault.get(input.quoteId);
+  if (!stored || Date.now() - stored.at > 60_000) throw new Error("Quote expired. Try the order again.");
+  quoteVault.delete(input.quoteId);
+  const { ok, text, status } = await fetchText(
+    "https://lite-api.jup.ag/swap/v1/swap",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        quoteResponse: stored.raw,
+        userPublicKey: input.userPublicKey,
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+      }),
+    },
+    12000,
+  );
+  const json = JSON.parse(text) as { swapTransaction?: string; error?: string };
+  if (!ok || !json.swapTransaction) throw new Error(json.error || `Swap build failed (${status})`);
+  return { tx: json.swapTransaction };
+}
+
+export async function broadcastSigned(tx: string) {
+  if (!/^[A-Za-z0-9+/=]+$/.test(tx) || tx.length < 80 || tx.length > 4000) {
+    throw new Error("Signed transaction is not usable");
+  }
+  const { result } = await rpcCall<string>("sendTransaction", [
+    tx,
+    { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 2 },
+  ]);
+  return { signature: result };
 }
 
 export type TopTrader = {

@@ -16,6 +16,7 @@ export type PaperPosition = {
   highMarkSol: number | null;
   markSol: number | null;
   markAt: number | null;
+  kind?: "paper" | "live";
 };
 
 export type ActivityItem = {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { askMaxi } from "./agent.functions";
-import { getBalances, getFeed, getSmartFlow, getTopTraders, previewBuy, previewSell, scanWallets, tokenBrief } from "./market.functions";
-import { NETWORK_FEE_SOL, planCopy, isSolAddress } from "./risk";
+import { getBalances, getFeed, getSmartFlow, getTopTraders, previewBuy, previewSell, scanWallets, buildSwap, sendSigned, tokenBrief } from "./market.functions";
+import { NETWORK_FEE_SOL, planCopy, isSolAddress, formatSol } from "./risk";
 import {
   addRealized,
   logActivity,
@@ -49,6 +49,145 @@ function openCostFor(leader: string) {
   };
 }
 
+async function submitLiveBuy(
+  input: { signature: string; wallet: string; mint: string; name: string; symbol: string },
+  sizeSol: number,
+) {
+  const { signerPublicKey, signSwap } = await import("./signer");
+  const user = signerPublicKey();
+  if (!user || !useTerminal.getState().liveAck) {
+    logActivity({
+      tone: "warn",
+      title: "Live buy blocked",
+      detail: user ? "Live is not armed." : "Load a signing key in this tab before Live can send.",
+      href: `https://solscan.io/tx/${input.signature}`,
+    });
+    return;
+  }
+  const state = useTerminal.getState();
+  try {
+    const evalResult = await previewBuy({
+      data: { mint: input.mint, lamports: Math.floor(sizeSol * 1e9), slippageBps: state.slippageBps },
+    });
+    if (!evalResult.ok || !evalResult.quote || !evalResult.token) {
+      const failed = evalResult.checks.filter((check) => !check.pass).map((check) => check.detail);
+      logActivity({
+        tone: "warn",
+        title: "Live buy rejected",
+        detail: failed[0] || "Mandatory check failed",
+        href: `https://pump.fun/coin/${input.mint}`,
+      });
+      return;
+    }
+    const built = await buildSwap({ data: { quoteId: evalResult.quote.id, userPublicKey: user } });
+    const sent = await sendSigned({ data: { tx: signSwap(built.tx) } });
+    const token = evalResult.token;
+    const boughtRaw = BigInt(evalResult.quote.outAmount);
+    useTerminal.setState((current) => {
+      const existing = current.positions.find(
+        (position) => position.mint === input.mint && position.leader === input.wallet && position.kind === "live",
+      );
+      const positions = existing
+        ? current.positions.map((position) =>
+            position.id === existing.id
+              ? {
+                  ...position,
+                  amountRaw: (BigInt(position.amountRaw) + boughtRaw).toString(),
+                  costSol: position.costSol + sizeSol,
+                  symbol: token.symbol || position.symbol,
+                }
+              : position,
+          )
+        : [
+            {
+              id: `${sent.signature.slice(0, 8)}-${input.mint.slice(0, 4)}`,
+              mint: input.mint,
+              symbol: token.symbol || input.symbol || "?",
+              name: token.name || input.name || "Unknown",
+              amountRaw: boughtRaw.toString(),
+              decimals: token.decimals,
+              costSol: sizeSol,
+              leader: input.wallet,
+              openedAt: Date.now(),
+              highMarkSol: null,
+              markSol: null,
+              markAt: null,
+              kind: "live" as const,
+            },
+            ...current.positions,
+          ];
+      return { positions };
+    });
+    logActivity({
+      tone: "ok",
+      title: "Live buy sent",
+      detail: `${formatSol(sizeSol)} SOL → ${token.symbol} · ${sent.signature}`,
+      href: `https://solscan.io/tx/${sent.signature}`,
+    });
+  } catch (error) {
+    logActivity({
+      tone: "danger",
+      title: "Live buy failed",
+      detail: error instanceof Error ? error.message : "The signed order was not accepted",
+      href: `https://solscan.io/tx/${input.signature}`,
+    });
+  }
+}
+
+async function submitLiveSell(position: PaperPosition, fractionBps: number) {
+  const { signerPublicKey, signSwap } = await import("./signer");
+  const user = signerPublicKey();
+  if (!user) {
+    logActivity({ tone: "warn", title: "Live sell blocked", detail: "Load a signing key in this tab." });
+    return;
+  }
+  const total = BigInt(position.amountRaw);
+  const part = (total * BigInt(fractionBps)) / 10_000n;
+  if (part <= 0n) return;
+  const quote = await previewSell({
+    data: { mint: position.mint, amountRaw: part.toString(), slippageBps: useTerminal.getState().slippageBps },
+  });
+  if (!quote.ok || !quote.quote) {
+    logActivity({
+      tone: "warn",
+      title: "Live sell skipped",
+      detail: quote.error || "No executable sell quote",
+      href: `https://pump.fun/coin/${position.mint}`,
+    });
+    return;
+  }
+  try {
+    const built = await buildSwap({ data: { quoteId: quote.quote.id, userPublicKey: user } });
+    const sent = await sendSigned({ data: { tx: signSwap(built.tx) } });
+    const proceeds = Number(quote.quote.outAmount) / 1e9;
+    const cost = portion(position.costSol, part, total);
+    addRealized(proceeds - NETWORK_FEE_SOL - cost);
+    const left = total - part;
+    useTerminal.setState((state) => ({
+      positions:
+        left <= 0n
+          ? state.positions.filter((row) => row.id !== position.id)
+          : state.positions.map((row) =>
+              row.id === position.id
+                ? { ...row, amountRaw: left.toString(), costSol: Math.max(0, row.costSol - cost) }
+                : row,
+            ),
+    }));
+    logActivity({
+      tone: "ok",
+      title: "Live sell sent",
+      detail: `${position.symbol} · quote ${proceeds.toFixed(4)} SOL · ${sent.signature}`,
+      href: `https://solscan.io/tx/${sent.signature}`,
+    });
+  } catch (error) {
+    logActivity({
+      tone: "danger",
+      title: "Live sell failed",
+      detail: error instanceof Error ? error.message : "The signed sell was not accepted",
+    });
+  }
+}
+
 async function handleBuy(input: {
   signature: string;
   wallet: string;
@@ -85,17 +224,12 @@ async function handleBuy(input: {
     return;
   }
   if (state.mode === "off") return;
-  if (state.mode === "live") {
+  if (state.mode === "live" && !state.liveAck) {
     remember(input.signature);
-    logActivity({
-      tone: "danger",
-      title: "Live buy blocked",
-      detail: "No signing key is configured. Private keys are never accepted, so the order was not sent.",
-      href: `https://solscan.io/tx/${input.signature}`,
-    });
+    logActivity({ tone: "warn", title: "Live buy blocked", detail: "Live is not armed." });
     return;
   }
-  if (!state.paperAck) {
+  if (state.mode === "paper" && !state.paperAck) {
     remember(input.signature);
     logActivity({ tone: "warn", title: "Paper buy blocked", detail: "Paper trading is not authorized." });
     return;
@@ -128,6 +262,11 @@ async function handleBuy(input: {
       detail: plan.blockers[0] || "Risk check failed",
       href: `https://solscan.io/tx/${input.signature}`,
     });
+    return;
+  }
+  if (state.mode === "live") {
+    remember(input.signature);
+    await submitLiveBuy(input, plan.sizeSol);
     return;
   }
   useTerminal.getState().setReserved(useTerminal.getState().reservedSol + plan.sizeSol);
@@ -268,16 +407,28 @@ async function handleSell(input: {
     detail: `${input.soldPct == null ? "size unverified" : `${Math.round(input.soldPct * 100)}% of their tracked balance`} · ${input.mint.slice(0, 4)}…`,
     href: `https://solscan.io/tx/${input.signature}`,
   });
-  if (state.killed || state.mode !== "paper" || !state.paperAck) {
-    if (state.mode === "live") {
-      logActivity({
-        tone: "danger",
-        title: "Live sell blocked",
-        detail: "Signing is disabled. The mirrored sell was not submitted.",
-      });
+  if (state.killed || state.mode === "off") return;
+  if (state.mode === "live") {
+    if (!state.liveAck) {
+      logActivity({ tone: "warn", title: "Live sell blocked", detail: "Live is not armed." });
+      return;
     }
+    const position = useTerminal
+      .getState()
+      .positions.find((row) => row.leader === input.wallet && row.mint === input.mint && row.kind === "live");
+    if (!position) {
+      logActivity({
+        tone: "warn",
+        title: "Live sell skipped",
+        detail: "No live position is tracked for this leader and mint.",
+      });
+      return;
+    }
+    const pct = input.soldPct == null ? 1 : Math.max(0, Math.min(1, input.soldPct));
+    await submitLiveSell(position, Math.max(1, Math.round(pct * 10_000)));
     return;
   }
+  if (!state.paperAck) return;
   const ageSec = (Date.now() - input.at) / 1000;
   if (ageSec > state.maxSignalAgeSec) {
     logActivity({ tone: "warn", title: "Stale sell skipped", detail: `${Math.round(ageSec)}s old` });

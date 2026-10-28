@@ -48,6 +48,23 @@ export const previewSell = createServerFn({ method: "POST" })
     return evaluateSell(data);
   });
 
+export const buildSwap = createServerFn({ method: "POST" })
+  .validator((data: { quoteId: string; userPublicKey: string }) => ({
+    quoteId: String(data?.quoteId || ""),
+    userPublicKey: String(data?.userPublicKey || ""),
+  }))
+  .handler(async ({ data }) => {
+    const { buildSwapTx } = await import("./market.server");
+    return buildSwapTx(data);
+  });
+
+export const sendSigned = createServerFn({ method: "POST" })
+  .validator((data: { tx: string }) => ({ tx: String(data?.tx || "") }))
+  .handler(async ({ data }) => {
+    const { broadcastSigned } = await import("./market.server");
+    return broadcastSigned(data.tx);
+  });
+
 export const getSmartFlow = createServerFn({ method: "GET" }).handler(async () => {
   const { getSmartFlow: read } = await import("./market.server");
   return read();

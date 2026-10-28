@@ -1,12 +1,15 @@
+import { useState } from "react";
 import { Octagon } from "lucide-react";
 import logo from "@/assets/wojak-logo.jpg";
 import { formatAge, formatSol, formatUsd, planCopy, shortAddr, solscanAccount, solscanTx } from "@/lib/risk";
 import { logActivity, PAYBOX_WALLET, useTerminal, type Mode } from "@/lib/store";
+import { clearSecret, loadSecret, useSigner } from "@/lib/signer";
 import { useLive } from "@/lib/use-live";
 
 export function Terminal() {
   const live = useLive();
   const store = useTerminal();
+  const signer = useSigner();
   const openCost = store.positions.reduce((sum, position) => sum + position.costSol, 0);
   const day = new Date().toISOString().slice(0, 10);
   const realized = store.realizedDay === day ? store.realizedSol : 0;
@@ -29,6 +32,7 @@ export function Terminal() {
   const traders = live.leaders?.traders || [];
   const solUsd = live.feed?.health.solPriceUsd ?? null;
   const isPaybox = store.watchWallet === PAYBOX_WALLET;
+  const [confirmLive, setConfirmLive] = useState(false);
   const auto = autoLine({
     killed: store.killed,
     mode: store.mode,
@@ -36,11 +40,23 @@ export function Terminal() {
     leaders: traders.length,
     size: plan.sizeSol,
     blocker: plan.blockers[0] || null,
+    hasKey: Boolean(signer.publicKey),
   });
 
   function arm(mode: Mode) {
-    if (store.killed) return;
-    store.patch({ mode, paperAck: mode === "paper" ? true : store.paperAck });
+    if (store.killed && mode !== "off") return;
+    if (mode === "live") {
+      if (store.mode === "live") {
+        setConfirmLive(false);
+        store.patch({ mode: "off", liveAck: false });
+        logActivity({ tone: "info", title: "Live off", detail: "Live copy is disarmed. The top 5 are still listed." });
+        return;
+      }
+      setConfirmLive(true);
+      return;
+    }
+    setConfirmLive(false);
+    store.patch({ mode, paperAck: mode === "paper" ? true : store.paperAck, liveAck: false });
     logActivity({
       tone: mode === "paper" ? "ok" : "info",
       title: mode === "paper" ? "Auto paper on" : "Auto off",
@@ -51,8 +67,22 @@ export function Terminal() {
     });
   }
 
+  function confirmArmLive() {
+    if (store.killed) return;
+    setConfirmLive(false);
+    store.patch({ mode: "live", liveAck: true });
+    logActivity({
+      tone: "warn",
+      title: "Live on",
+      detail: signer.publicKey
+        ? "Armed. The key in this tab will sign the next sized buy from the top 5."
+        : "Armed. Load a signing key in this tab or orders stay blocked.",
+    });
+  }
+
   function kill() {
-    store.patch({ killed: true, mode: "off" });
+    setConfirmLive(false);
+    store.patch({ killed: true, mode: "off", liveAck: false });
     store.setReserved(0);
     logActivity({ tone: "danger", title: "Emergency stop", detail: "Auto copy is halted." });
   }
@@ -67,8 +97,13 @@ export function Terminal() {
         </div>
         <div className="ml-auto flex items-center gap-2">
           <div className="text-right">
-            <p className="text-xs text-muted">{isPaybox ? "Paybox" : "Wallet"}</p>
+            <p className="text-xs text-muted">
+              {signer.publicKey && store.watchWallet === signer.publicKey ? "Signer" : isPaybox ? "Paybox" : "Wallet"}
+            </p>
             <p className="num text-lg leading-none">{live.balanceSol == null ? "—" : `${formatSol(live.balanceSol)} SOL`}</p>
+            <p className={`text-xs font-semibold ${store.killed ? "text-danger" : store.mode === "live" ? "text-warn" : store.mode === "paper" ? "text-ok" : "text-muted"}`}>
+              {store.killed ? "Stopped" : store.mode === "live" ? "Live on" : store.mode === "paper" ? "Paper on" : "Off"}
+            </p>
           </div>
           <button type="button" onClick={kill} className="inline-flex h-11 items-center gap-2 rounded-full bg-danger px-4 text-sm font-semibold text-bg">
             <Octagon className="h-4 w-4" />
@@ -131,7 +166,7 @@ export function Terminal() {
                 {solUsd && live.balanceSol != null ? ` · ${formatUsd(live.balanceSol * solUsd)}` : ""}
               </span>
             </p>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <button
                 type="button"
                 onClick={() => arm("off")}
@@ -147,9 +182,33 @@ export function Terminal() {
               >
                 Paper
               </button>
+              <button
+                type="button"
+                disabled={store.killed}
+                onClick={() => arm("live")}
+                className={`h-11 rounded-full text-sm font-semibold disabled:opacity-40 ${store.mode === "live" ? "bg-warn text-bg" : "border border-line"}`}
+              >
+                Live
+              </button>
             </div>
+            {confirmLive && store.mode !== "live" && (
+              <div className="flex flex-col gap-3 rounded-2xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
+                <p>Arm live on the current top 5. A loaded key in this tab will sign and send real swaps from that wallet.</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => setConfirmLive(false)} className="h-11 rounded-full border border-line">
+                    Cancel
+                  </button>
+                  <button type="button" onClick={confirmArmLive} className="h-11 rounded-full bg-warn font-semibold text-bg">
+                    Arm live
+                  </button>
+                </div>
+              </div>
+            )}
+            <LiveKey />
             <p className="text-xs leading-relaxed text-muted">
-              Paper uses a live Jupiter quote and does not send a transaction. Live signing is not connected, so this desk cannot spend Paybox.
+              {store.mode === "live"
+                ? "Live signs with the key in this tab only. It is not saved. Off or Stop disarms sending."
+                : "Paper does not send a transaction. Live sends only after you load a key and arm it."}
             </p>
             <p className="num break-all text-xs text-muted">{store.watchWallet}</p>
           </section>
@@ -189,6 +248,71 @@ export function Terminal() {
         />
       </section>
     </main>
+  );
+}
+
+function LiveKey() {
+  const store = useTerminal();
+  const signer = useSigner();
+  const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  function save() {
+    const pasted = value;
+    setValue("");
+    try {
+      const pub = loadSecret(pasted);
+      setError(null);
+      store.patch({ watchWallet: pub });
+      logActivity({
+        tone: "ok",
+        title: "Live key loaded",
+        detail: `${shortAddr(pub)} can sign. The secret stays in this tab only and is not saved.`,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Key was rejected");
+    }
+  }
+
+  function wipe() {
+    const pub = signer.publicKey;
+    clearSecret();
+    setValue("");
+    setError(null);
+    if (pub && store.watchWallet === pub) store.patch({ watchWallet: PAYBOX_WALLET });
+    logActivity({ tone: "info", title: "Live key cleared", detail: "This tab can no longer sign." });
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {signer.publicKey ? (
+        <div className="flex items-center justify-between gap-3 rounded-2xl bg-bg/70 px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-xs text-ok">Key loaded</p>
+            <p className="num truncate text-sm">{shortAddr(signer.publicKey)}</p>
+          </div>
+          <button type="button" onClick={wipe} className="h-11 shrink-0 rounded-full border border-line px-4 text-sm">
+            Clear
+          </button>
+        </div>
+      ) : (
+        <>
+          <input
+            type="password"
+            value={value}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="Paste private key to start"
+            onChange={(event) => setValue(event.target.value)}
+            className="h-11 rounded-2xl border border-line bg-bg/70 px-4 text-sm outline-none"
+          />
+          <button type="button" onClick={save} disabled={!value.trim()} className="h-11 rounded-full bg-cyan text-sm font-semibold text-bg disabled:opacity-40">
+            Load key
+          </button>
+        </>
+      )}
+      {error && <p className="text-xs text-danger">{error}</p>}
+    </div>
   );
 }
 
@@ -248,9 +372,17 @@ function autoLine(input: {
   leaders: number;
   size: number;
   blocker: string | null;
+  hasKey: boolean;
 }) {
   if (input.killed) return "Stopped. Release the switch before auto can run.";
-  if (input.mode !== "paper") return "Auto is off. Turn on Paper to copy the next fresh buy from these five.";
+  if (input.mode === "off") return "Auto is off. Turn on Paper or Live.";
+  if (input.mode === "live") {
+    if (!input.hasKey) return "Live is on. Load your signing key to start.";
+    if (input.leaders === 0) return "Live is on. Waiting for the top 5.";
+    if (input.balance == null) return "Live is on. Waiting for the signer balance.";
+    if (input.size <= 0) return `Live is on, but nothing will be sent. ${input.blocker || "Size is zero."}`;
+    return `Live is on. The next fresh buy is signed in this tab at ${formatSol(input.size)} SOL.`;
+  }
   if (input.leaders === 0) return "Paper is on, but the top 5 are not loaded yet.";
   if (input.balance == null) return "Paper is on. Waiting for the Paybox balance before a size can be set.";
   if (input.size <= 0) return `Paper is on, but no copy will fire. ${input.blocker || "Size is zero."}`;
